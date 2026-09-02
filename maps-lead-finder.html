@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ATHENA — Scraper</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100vh;background:#060608;color:#EAEAEA;font-family:'Space Grotesk',sans-serif}
+  body::before{content:"";position:fixed;inset:0;background:radial-gradient(800px 400px at 15% 0%, #FF3B30 0%, transparent 55%),radial-gradient(600px 500px at 90% 10%, #7CFF67 0%, transparent 50%),radial-gradient(700px 600px at 50% 100%, #6B4EFF 0%, transparent 60%),linear-gradient(180deg, #0A0A0F 0%, #060608 100%);z-index:-2}
+  body::after{content:"";position:fixed;inset:0;opacity:.07;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.9'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");pointer-events:none;z-index:-1}
+  #root{min-height:100vh}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-thumb{background:#2A2A32;border-radius:99px}
+  .mono{font-family:'JetBrains Mono',monospace}
+  input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+  input[type=number]{-moz-appearance:textfield}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useRef, useEffect } = React;
+const SCRAPER_DEFAULT_URL = (location.hostname==="localhost"||location.hostname==="127.0.0.1") ? "http://127.0.0.1:8000" : location.origin;
+const CERE_DEFAULT_URL = SCRAPER_DEFAULT_URL;
+function csvEscape(v){const s=String(v==null?"":v);return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;}
+function leadsToCSV(leads){const h=["Business Name","Phone","Has Website","Website","Hours","Address","Rating","Review Count","Status","Maps URL","Category","Query"];const rows=leads.map(l=>[l.name,l.phone,l.hasWebsite?"Yes":"No",l.website,l.hours,l.address,l.rating,l.reviews,l.status,l.maps_url||"",l.category||"",l.query||""]);return [h,...rows].map(r=>r.map(csvEscape).join(",")).join("\r\n");}
+function downloadCSV(leads,filename){const csv=leadsToCSV(leads);const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);}
+function downloadJSON(leads,filename){const blob=new Blob([JSON.stringify(leads,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);}
+const GOOGLE_FIELD_MASK=["places.id","places.displayName","places.formattedAddress","places.nationalPhoneNumber","places.internationalPhoneNumber","places.websiteUri","places.regularOpeningHours","places.rating","places.userRatingCount","places.businessStatus","nextPageToken"].join(",");
+function googleHours(p){if(!p.regularOpeningHours||!p.regularOpeningHours.weekdayDescriptions) return "";return p.regularOpeningHours.weekdayDescriptions.join(" | ");}
+function googleToLead(p){return{id:p.id,name:(p.displayName&&p.displayName.text)||"",address:p.formattedAddress||"",phone:p.internationalPhoneNumber||p.nationalPhoneNumber||"",hasWebsite:!!p.websiteUri,website:p.websiteUri||"",hours:googleHours(p),rating:p.rating!=null?p.rating:"",reviews:p.userRatingCount!=null?p.userRatingCount:"",status:p.businessStatus||"",maps_url:"",category:"",query:""};}
+async function searchGoogle({apiKey,query,pageToken,signal}){const body={textQuery:query.trim()};if(pageToken) body.pageToken=pageToken;const res=await fetch("https://places.googleapis.com/v1/places:searchText",{method:"POST",headers:{"Content-Type":"application/json","X-Goog-Api-Key":apiKey.trim(),"X-Goog-FieldMask":GOOGLE_FIELD_MASK},body:JSON.stringify(body),signal});const data=await res.json();if(!res.ok) throw new Error((data&&data.error&&data.error.message)||`Request failed (${res.status}).`);return{leads:(data.places||[]).map(googleToLead),nextPageToken:data.nextPageToken||null};}
+const OSM_CATEGORY_MAP={"restaurant":[["amenity","restaurant"]],"restaurants":[["amenity","restaurant"]],"fast food":[["amenity","fast_food"]],"cafe":[["amenity","cafe"]],"cafes":[["amenity","cafe"]],"coffee":[["amenity","cafe"]],"coffee shop":[["amenity","cafe"]],"bar":[["amenity","bar"]],"bars":[["amenity","bar"]],"pub":[["amenity","pub"]],"pubs":[["amenity","pub"]],"bakery":[["shop","bakery"]],"bakeries":[["shop","bakery"]],"hotel":[["tourism","hotel"]],"hotels":[["tourism","hotel"]],"gym":[["leisure","fitness_centre"]],"gyms":[["leisure","fitness_centre"]],"fitness":[["leisure","fitness_centre"]],"salon":[["shop","hairdresser"],["shop","beauty"]],"salons":[["shop","hairdresser"],["shop","beauty"]],"spa":[["shop","beauty"],["leisure","spa"]],"dentist":[["amenity","dentist"]],"dentists":[["amenity","dentist"]],"doctor":[["amenity","doctors"],["amenity","clinic"]],"doctors":[["amenity","doctors"],["amenity","clinic"]],"clinic":[["amenity","clinic"]],"clinics":[["amenity","clinic"]],"hospital":[["amenity","hospital"]],"hospitals":[["amenity","hospital"]],"pharmacy":[["amenity","pharmacy"]],"pharmacies":[["amenity","pharmacy"]],"chemist":[["amenity","pharmacy"]],"lawyer":[["office","lawyer"]],"lawyers":[["office","lawyer"]],"attorney":[["office","lawyer"]],"plumber":[["craft","plumber"]],"plumbers":[["craft","plumber"]],"electrician":[["craft","electrician"]],"electricians":[["craft","electrician"]],"mechanic":[["shop","car_repair"]],"mechanics":[["shop","car_repair"]],"car repair":[["shop","car_repair"]],"hardware store":[["shop","hardware"]],"hardware":[["shop","hardware"]],"supermarket":[["shop","supermarket"]],"supermarkets":[["shop","supermarket"]],"grocery":[["shop","supermarket"],["shop","grocery"]],"bank":[["amenity","bank"]],"banks":[["amenity","bank"]],"school":[["amenity","school"]],"schools":[["amenity","school"]],"gas station":[["amenity","fuel"]],"petrol station":[["amenity","fuel"]],"fuel":[["amenity","fuel"]],"laundry":[["shop","laundry"]],"laundromat":[["shop","laundry"]]};
+function parseOsmQuery(query){const q=query.trim().toLowerCase();let category=q,location="";const inMatch=q.match(/^(.*?)\s+(?:in|at)\s+(.+)$/);const nearMatch=q.match(/^(.*?)\s+near\s+(.+)$/);if(inMatch){category=inMatch[1].trim();location=inMatch[2].trim();}else if(nearMatch){category=nearMatch[1].trim();location=nearMatch[2].trim();}location=location.replace(/^me$/,"").trim();const keys=Object.keys(OSM_CATEGORY_MAP).sort((a,b)=>b.length-a.length);let tags=null,matchedKeyword=null;for(const k of keys){if(category===k||category.includes(k)){tags=OSM_CATEGORY_MAP[k];matchedKeyword=k;break;}}return{category,location,tags,matchedKeyword,freeText:!tags};}
+function getBrowserLocation(signal){return new Promise((resolve,reject)=>{if(!navigator.geolocation){reject(new Error("This browser can't share location."));return;}if(signal&&signal.aborted){reject(new DOMException("Aborted","AbortError"));return;}const onAbort=()=>reject(new DOMException("Aborted","AbortError"));if(signal) signal.addEventListener("abort",onAbort,{once:true});navigator.geolocation.getCurrentPosition(pos=>{if(signal) signal.removeEventListener("abort",onAbort);resolve({lat:pos.coords.latitude,lon:pos.coords.longitude});},()=>{if(signal) signal.removeEventListener("abort",onAbort);reject(new Error("Location permission was denied."));},{timeout:8000});});}
+async function geocodeLocation(location,signal){const url=`https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(location)}&limit=1`;const res=await fetch(url,{headers:{"Accept-Language":"en"},signal});if(!res.ok) throw new Error("Couldn't look up that place.");const data=await res.json();if(!data||data.length===0) throw new Error(`Couldn't find "${location}"`);const b=data[0].boundingbox.map(Number);return{south:b[0],north:b[1],west:b[2],east:b[3]};}
+function bboxAroundPoint(lat,lon,km){const dLat=km/111;const dLon=km/(111*Math.cos(lat*Math.PI/180));return{south:lat-dLat,north:lat+dLat,west:lon-dLon,east:lon+dLon};}
+function buildOverpassQuery({tags,freeText,category,bbox}){const bboxStr=`${bbox.south},${bbox.west},${bbox.north},${bbox.east}`;let clauses=[];if(!freeText){tags.forEach(([k,v])=>{clauses.push(`node["${k}"="${v}"]["name"](${bboxStr});`);clauses.push(`way["${k}"="${v}"]["name"](${bboxStr});`);});}else{const e=category.replace(/["\\]/g,"");clauses.push(`node["name"~"${e}",i](${bboxStr});`);clauses.push(`way["name"~"${e}",i](${bboxStr});`);}return `[out:json][timeout:25];(${clauses.join("")});out center 60 tags;`;}
+function osmToLead(el){const t=el.tags||{};const a=[t["addr:housenumber"],t["addr:street"],t["addr:suburb"],t["addr:city"]].filter(Boolean);const ph=t.phone||t["contact:phone"]||t.mobile||t["contact:mobile"]||"";return{id:`${el.type}/${el.id}`,name:t.name||"",address:a.join(", "),phone:ph,hasWebsite:!!(t.website||t["contact:website"]),website:t.website||t["contact:website"]||"",hours:t.opening_hours||"",rating:"",reviews:"",status:"",maps_url:"",category:"",query:""};}
+const OVERPASS_ENDPOINTS=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter","https://overpass.private.coffee/api/interpreter","https://api.openstreetmap.fr/oapi/interpreter"];
+async function fetchOverpass(q,signal){const at=[];for(const ep of OVERPASS_ENDPOINTS){if(signal&&signal.aborted) throw new DOMException("Aborted","AbortError");try{const url=`${ep}?data=${encodeURIComponent(q)}`;const r=await fetch(url,{signal});if(!r.ok){at.push(`${ep} → HTTP ${r.status}`);continue;}return await r.json();}catch(e){if(e.name==="AbortError") throw e;at.push(`${ep} → ${e.message||"no response"}`);}}throw new Error(`All Overpass mirrors failed:\n`+at.map(a=>`• ${a}`).join("\n"));}
+async function searchOSM({query,useMyLocation,signal}){const p=parseOsmQuery(query);let bbox;if(useMyLocation||!p.location){const pos=await getBrowserLocation(signal);bbox=bboxAroundPoint(pos.lat,pos.lon,5);}else{bbox=await geocodeLocation(p.location,signal);}const q=buildOverpassQuery({tags:p.tags,freeText:p.freeText,category:p.category,bbox});const data=await fetchOverpass(q,signal);return{leads:(data.elements||[]).filter(e=>e.tags&&e.tags.name).map(osmToLead),matchedKeyword:p.matchedKeyword};}
+async function searchScraper({query,cereUrl,maxResults,signal}){const base=cereUrl.replace(/\/+$/,"");const url=`${base}/api/search?q=${encodeURIComponent(query.trim())}&max_results=${encodeURIComponent(maxResults||50)}`;const res=await fetch(url,{signal});const data=await res.json().catch(()=>({}));if(!res.ok){const m=data.error||data.detail||`Scraper backend failed (${res.status})`;throw new Error(m+(res.status>=500?" — is cere.py running? python cere.py --serve":""));}if(data.error) throw new Error(data.error);return{leads:(data.leads||[]).map(l=>({...l, category: l.category||query.split(/\s+in\s+/i)[0].trim(), query}))};}
+async function searchCere(p){return searchScraper(p);}
+
+function App(){
+  const [source,setSource]=useState("cere");
+  const [apiKey,setApiKey]=useState("");
+  const [cereUrl,setCereUrl]=useState(SCRAPER_DEFAULT_URL);
+  const [query,setQuery]=useState("");
+  const [maxResults,setMaxResults]=useState(30);
+  const [leads,setLeads]=useState([]);
+  const [selected,setSelected]=useState({});
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState("");
+  const [hasSearched,setHasSearched]=useState(false);
+  const [onlyNoWebsite,setOnlyNoWebsite]=useState(false);
+  const [copiedId,setCopiedId]=useState(null);
+  const [expandedHours,setExpandedHours]=useState({});
+  const [cereHealth,setCereHealth]=useState(null);
+  const [history,setHistory]=useState([]);
+  const [stats,setStats]=useState(null);
+  const [showHistory,setShowHistory]=useState(false);
+  const [sortBy,setSortBy]=useState("default");
+  const [filterCategory,setFilterCategory]=useState("all");
+  const [filterRating,setFilterRating]=useState(0);
+  const [hasPhoneFilter,setHasPhoneFilter]=useState("all");
+  const [searchInResults,setSearchInResults]=useState("");
+  const [dedup,setDedup]=useState(true);
+  const abortRef=useRef(null);
+  const requestIdRef=useRef(0);
+  const keyInputRef=useRef(null);
+
+  const fetchHistory=async()=>{try{const r=await fetch(`${cereUrl.replace(/\/+$/,"")}/api/history?limit=80`);if(r.ok){const d=await r.json();setHistory(d.history||[])}else{const ls=JSON.parse(localStorage.getItem("athena_history")||"[]");setHistory(ls)}}catch{const ls=JSON.parse(localStorage.getItem("athena_history")||"[]");setHistory(ls)}};
+  const fetchStats=async()=>{try{const r=await fetch(`${cereUrl.replace(/\/+$/,"")}/api/stats`);if(r.ok){const d=await r.json();setStats(d)}}catch{}};
+  useEffect(()=>{fetchHistory();fetchStats();const id=setInterval(fetchStats,10000);return()=>clearInterval(id)},[cereUrl]);
+  useEffect(()=>{(async()=>{try{const r=await fetch(`${SCRAPER_DEFAULT_URL}/api/health`,{signal:AbortSignal.timeout(2000)});setCereHealth(r.ok?"ok":"error")}catch{setCereHealth("offline")}})()},[]);
+
+  const categories=useMemo(()=>{const s=new Set(leads.map(l=> (l.category|| (l.query||query).split(/\s+in\s+/i)[0].trim().toLowerCase() ).slice(0,30)));return ["all",...Array.from(s).filter(Boolean)]},[leads,query]);
+
+  const processedLeads=useMemo(()=>{
+    let lst=[...leads];
+    if(dedup){
+      const seen=new Set();lst=lst.filter(l=>{
+        const norm=(l.phone||"").replace(/\D/g,"").slice(-10);
+        const key=norm?`p:${norm}`:`n:${(l.name+l.address).toLowerCase()}`;
+        if(seen.has(key)) return false;seen.add(key);return true;
+      });
+    }
+    if(filterCategory!=="all") lst=lst.filter(l=> (l.category||"").toLowerCase().includes(filterCategory.toLowerCase()));
+    if(onlyNoWebsite) lst=lst.filter(l=>!l.hasWebsite);
+    if(hasPhoneFilter==="yes") lst=lst.filter(l=>!!l.phone);
+    if(hasPhoneFilter==="no") lst=lst.filter(l=>!l.phone);
+    if(filterRating>0) lst=lst.filter(l=> parseFloat(l.rating||0) >= filterRating);
+    if(searchInResults.trim()){const q=searchInResults.toLowerCase();lst=lst.filter(l=> `${l.name} ${l.phone} ${l.address}`.toLowerCase().includes(q))}
+    if(sortBy==="rating") lst.sort((a,b)=> parseFloat(b.rating||0)-parseFloat(a.rating||0));
+    else if(sortBy==="reviews") lst.sort((a,b)=> parseInt((b.reviews||"0").replace(/,/g,""))-parseInt((a.reviews||"0").replace(/,/g,"")));
+    else if(sortBy==="name") lst.sort((a,b)=> a.name.localeCompare(b.name));
+    return lst;
+  },[leads,filterCategory,onlyNoWebsite,hasPhoneFilter,filterRating,searchInResults,sortBy,dedup]);
+
+  const selectedCount=useMemo(()=>processedLeads.filter(l=>selected[l.id]).length,[processedLeads,selected]);
+  const allChecked=processedLeads.length>0&&processedLeads.every(l=>selected[l.id]);
+
+  async function runSearch(pageToken, overrideQuery){
+    const q = (overrideQuery||query).trim();
+    if(source==="google"&&!apiKey.trim()){setError("Add Google API key.");return;}
+    if(!q){setError("Type a search.");return;}
+    if(!overrideQuery) setQuery(q);
+    if(abortRef.current) try{abortRef.current.abort()}catch{}
+    const controller=new AbortController();abortRef.current=controller;
+    const timeoutId=setTimeout(()=>controller.abort(),90000);
+    const myId=++requestIdRef.current;
+    setLoading(true);setError("");
+    try{
+      let newLeads=[], token=null;
+      if(source==="google"){
+        const r=await searchGoogle({apiKey,query:q,pageToken,signal:controller.signal});newLeads=r.leads;token=r.nextPageToken;
+        if(requestIdRef.current!==myId) return;
+        setLeads(prev=>pageToken?[...prev,...newLeads.map(x=>({...x,query:q,category:q.split(/\s+in\s+/i)[0]}))]:newLeads.map(x=>({...x,query:q,category:q.split(/\s+in\s+/i)[0]})));
+        setHistory(h=>{const nh=[{query:q,category:q.split(/\s+in\s+/i)[0],lead_count:newLeads.length,created_at:new Date().toISOString()},...h].slice(0,80);localStorage.setItem("athena_history",JSON.stringify(nh));return nh});
+      } else if(source==="cere"){
+        const r=await searchScraper({query:q,cereUrl,maxResults,signal:controller.signal});newLeads=r.leads;
+        if(requestIdRef.current!==myId) return;
+        setLeads(newLeads); setHistory(h=>{const nh=[{query:q,category:q.split(/\s+in\s+/i)[0],lead_count:newLeads.length,created_at:new Date().toISOString()},...h].slice(0,80);localStorage.setItem("athena_history",JSON.stringify(nh));return nh});
+      } else {
+        const r=await searchOSM({query:q,useMyLocation:false,signal:controller.signal});newLeads=r.leads.map(x=>({...x,query:q,category:q.split(/\s+in\s+/i)[0]}));
+        if(requestIdRef.current!==myId) return;
+        setLeads(newLeads);
+      }
+      setHasSearched(true);
+      setTimeout(()=>{fetchHistory();fetchStats()},800);
+    }catch(err){ if(err.name==="AbortError") setError("Cancelled / timed out (90s)."); else setError(err.message||"Search failed.")} 
+    finally{clearTimeout(timeoutId);if(requestIdRef.current===myId) setLoading(false);if(abortRef.current===controller) abortRef.current=null;}
+  }
+  async function copyToClipboard(text,id){if(!text) return;try{await navigator.clipboard.writeText(text)}catch{const ta=document.createElement("textarea");ta.value=text;ta.style.position="fixed";ta.style.opacity="0";document.body.appendChild(ta);ta.select();document.execCommand("copy");document.body.removeChild(ta)} setCopiedId(id);setTimeout(()=>setCopiedId(null),1400);}
+  function toggle(id){setSelected(p=>({...p,[id]:!p[id]}))}
+  function toggleAll(c){const n={...selected};processedLeads.forEach(l=>n[l.id]=c);setSelected(n)}
+  function handleExport(fmt="csv"){const chosen=processedLeads.filter(l=>selected[l.id]);if(!chosen.length) return;const sq=query.trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/(^-|-$)/g,"")||"leads"; if(fmt==="json") downloadJSON(chosen,`${sq}-leads.json`); else downloadCSV(chosen,`${sq}-leads.csv`)}
+  const dedupRemoved = leads.length - processedLeads.length;
+
+  return(
+    <div style={{maxWidth:1280, margin:"0 auto", padding:"24px 18px 60px"}}>
+      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:12, marginBottom:18, flexWrap:"wrap"}}>
+        <div style={{display:"flex", alignItems:"center", gap:12}}>
+          <img src="black.gif" alt="ATHENA" onError={e=>{e.target.style.display="none"; e.target.nextSibling.style.display="grid"}} style={{width:44,height:44,borderRadius:12,objectFit:"cover",transform:"rotate(-3deg)",boxShadow:"0 6px 20px rgba(0,0,0,.5)",border:"1px solid rgba(255,255,255,.15)",background:"#000"}}/>
+          <div style={{width:44,height:44,borderRadius:12,background:"#000",display:"none",placeItems:"center",fontWeight:800,fontSize:18,color:"#fff",transform:"rotate(-3deg)",border:"1px solid rgba(255,255,255,.15)"}}>A</div>
+          <div>
+            <div style={{fontWeight:800,fontSize:22,letterSpacing:"-0.04em",lineHeight:1}}>ATHENA</div>
+            <div className="mono" style={{fontSize:10,letterSpacing:"0.18em",opacity:.55,marginTop:1}}>LEAD FINDER — SCRAPER</div>
+          </div>
+          <div style={{marginLeft:6,display:"flex",alignItems:"center",gap:8,background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.08)",padding:"6px 10px",borderRadius:99}}>
+            <span style={{width:8,height:8,borderRadius:99,background:cereHealth==="ok"?"#7CFF67":cereHealth==="offline"?"#FF3B30":"#FFD60A",boxShadow:cereHealth==="ok"?"0 0 10px #7CFF67":"none"}}></span>
+            <span className="mono" style={{fontSize:11,opacity:.8}}>{cereHealth==="ok"?"SCRAPER LIVE":cereHealth==="offline"?"OFFLINE":"…"}</span>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <button onClick={()=>setShowHistory(v=>!v)} style={{padding:"8px 14px",borderRadius:99,background:showHistory?"#fff":"rgba(255,255,255,.06)",color:showHistory?"#000":"#fff",border:"1px solid rgba(255,255,255,.12)",fontWeight:700,fontSize:12,cursor:"pointer"}}>{showHistory?"✕ HISTORY":"◷ HISTORY"} {history.length?`(${history.length})`:""}</button>
+          <button onClick={async()=>{if(confirm("Clear ALL saved DB + history?")){try{await fetch(`${cereUrl.replace(/\/+$/,"")}/api/leads/clear`,{method:"DELETE"})}catch{} localStorage.removeItem("athena_history");setHistory([]);setStats(null);fetchHistory()}}} className="mono" style={{padding:"8px 12px",borderRadius:99,background:"transparent",border:"1px solid rgba(255,59,48,.3)",color:"#FF8A80",fontSize:11,cursor:"pointer"}}>CLEAR DB</button>
+        </div>
+      </div>
+
+      {stats && (
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:10,marginBottom:14}}>
+          <div style={{background:"rgba(255,255,255,.04)",border:"1px solid rgba(255,255,255,.06)",borderRadius:14,padding:"12px 14px"}}><div className="mono" style={{fontSize:10,opacity:.5,letterSpacing:"0.12em"}}>TOTAL LEADS IN DB</div><div style={{fontSize:22,fontWeight:800}}>{stats.total_leads||0}</div><div className="mono" style={{fontSize:11,opacity:.4}}>{stats.with_phone||0} with phone</div></div>
+          <div style={{background:"rgba(255,255,255,.04)",border:"1px solid rgba(255,255,255,.06)",borderRadius:14,padding:"12px 14px"}}><div className="mono" style={{fontSize:10,opacity:.5,letterSpacing:"0.12em"}}>SEARCHES SAVED</div><div style={{fontSize:22,fontWeight:800}}>{stats.total_searches||history.length}</div><div className="mono" style={{fontSize:11,opacity:.4}}>{stats.without_website||0} no-website</div></div>
+          <div style={{background:"rgba(255,255,255,.04)",border:"1px solid rgba(255,255,255,.06)",borderRadius:14,padding:"12px 14px"}}><div className="mono" style={{fontSize:10,opacity:.5,letterSpacing:"0.12em"}}>TOP CATEGORY</div><div style={{fontSize:14,fontWeight:800,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{stats.by_category?.[0]?.category||"—"}</div><div className="mono" style={{fontSize:11,opacity:.4}}>{stats.by_category?.[0]?.cnt||0} leads</div></div>
+          <div style={{background:"rgba(124,255,103,.08)",border:"1px solid rgba(124,255,103,.2)",borderRadius:14,padding:"12px 14px"}}><div className="mono" style={{fontSize:10,opacity:.6,letterSpacing:"0.12em"}}>DEDUP</div><div style={{fontSize:13,fontWeight:700}}>{dedup?"ON":"OFF"} {dedupRemoved>0&&`• -${dedupRemoved}`}</div><button onClick={()=>setDedup(v=>!v)} style={{marginTop:6,padding:"4px 10px",borderRadius:99,background:dedup?"#7CFF67":"transparent",border:"1px solid rgba(255,255,255,.14)",fontSize:11,fontWeight:700,cursor:"pointer",color:dedup?"#000":"#fff"}}>toggle</button></div>
+        </div>
+      )}
+
+      {showHistory && (
+        <div style={{background:"rgba(14,14,18,.92)",border:"1px solid rgba(255,255,255,.08)",borderRadius:16,padding:14,marginBottom:14,backdropFilter:"blur(10px)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div className="mono" style={{fontSize:11,letterSpacing:"0.12em",opacity:.6}}>SEARCH HISTORY — by category • saved in DB (no dupes) • click to re-run</div>
+            <button onClick={fetchHistory} className="mono" style={{padding:"4px 10px",borderRadius:99,background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.08)",color:"#fff",fontSize:11,cursor:"pointer"}}>REFRESH</button>
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",maxHeight:160,overflow:"auto"}}>
+            {history.length===0?<span className="mono" style={{opacity:.4,fontSize:12}}>no history yet — run a search</span>:history.map((h,i)=>(
+              <button key={i} onClick={()=>runSearch(null,h.query)} style={{textAlign:"left",padding:"8px 12px",borderRadius:12,background:"rgba(255,255,255,.05)",border:"1px solid rgba(255,255,255,.06)",color:"#fff",cursor:"pointer",minWidth:180}}>
+                <div style={{fontSize:12,fontWeight:700,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:200}}>{h.query}</div>
+                <div className="mono" style={{fontSize:10,opacity:.5}}>{h.category||"—"} • {h.lead_count||0} • {h.created_at? new Date(h.created_at).toLocaleDateString():""}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{position:"relative",borderRadius:20,padding:1,background:"linear-gradient(135deg, rgba(255,255,255,.18), rgba(255,255,255,.04))"}}>
+        <div style={{background:"rgba(14,14,18,.92)",borderRadius:19,padding:18,backdropFilter:"blur(14px)",border:"1px solid rgba(255,255,255,.06)"}}>
+          <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"stretch"}}>
+            <div style={{flex:"1 1 520px",position:"relative",display:"flex",alignItems:"center"}}>
+              <span style={{position:"absolute",left:14,opacity:.5,fontSize:18}}>⌕</span>
+              <input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!loading) runSearch()}} placeholder='dentists in Koramangala  •  cafes in Indiranagar' style={{width:"100%",padding:"16px 16px 16px 40px",fontSize:15,fontWeight:500,background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.08)",borderRadius:14,color:"#fff",outline:"none"}}/>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8,background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.08)",borderRadius:14,padding:"6px 8px"}}>
+              <span className="mono" style={{fontSize:11,opacity:.6,padding:"0 4px 0 8px",letterSpacing:"0.08em"}}>MAX</span>
+              <button onClick={()=>setMaxResults(v=>Math.max(1,v-5))} style={{width:32,height:32,borderRadius:9,border:"1px solid rgba(255,255,255,.12)",background:"rgba(0,0,0,.3)",color:"#fff",cursor:"pointer"}}>−</button>
+              <input type="number" min="1" max="100" value={maxResults} onChange={e=>{const v=parseInt(e.target.value); if(!isNaN(v)) setMaxResults(Math.min(100,Math.max(1,v))); else if(e.target.value==="") setMaxResults(1)}} onFocus={e=>e.target.select()} style={{width:56,textAlign:"center",fontWeight:700,fontSize:15,background:"rgba(0,0,0,.2)",border:"1px solid rgba(255,255,255,.1)",borderRadius:8,color:"#fff",padding:"4px 0",outline:"none"}} className="mono"/>
+              <button onClick={()=>setMaxResults(v=>Math.min(100,v+5))} style={{width:32,height:32,borderRadius:9,border:"1px solid rgba(255,255,255,.12)",background:"#fff",color:"#000",cursor:"pointer",fontWeight:800}}>+</button>
+            </div>
+            <button onClick={()=>runSearch()} disabled={loading} style={{padding:"0 26px",fontSize:15,fontWeight:800,letterSpacing:"-0.02em",border:"none",borderRadius:14,background:loading?"#2A2A32":"#fff",color:loading?"#888":"#000",cursor:loading?"wait":"pointer",minWidth:120,boxShadow:loading?"none":"0 10px 30px rgba(255,255,255,.15)"}}>{loading?"SCANNING…":"HUNT →"}</button>
+            {loading && <button onClick={()=>abortRef.current?.abort()} style={{padding:"0 16px",borderRadius:14,border:"1px solid rgba(255,255,255,.12)",background:"transparent",color:"#fff",cursor:"pointer"}}>✕</button>}
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:12,flexWrap:"wrap",alignItems:"center"}}>
+            <div className="mono" style={{fontSize:11,opacity:.45}}>SOURCE</div>
+            {[["cere","SCRAPER • MAPS"],["osm","OSM"],["google","GOOGLE API"]].map(([k,label])=>(
+              <button key={k} onClick={()=>setSource(k)} style={{padding:"6px 12px",borderRadius:99,fontSize:12,fontWeight:700,border:"1px solid "+(source===k?"#fff":"rgba(255,255,255,.12)"),background:source===k?"#fff":"transparent",color:source===k?"#000":"#aaa",cursor:"pointer"}}>{label}</button>
+            ))}
+            {source==="google" && <input ref={keyInputRef} value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder="Google API key" style={{marginLeft:6,padding:"6px 10px",fontSize:12,background:"rgba(0,0,0,.4)",border:"1px solid rgba(255,255,255,.12)",borderRadius:99,color:"#fff",outline:"none"}}/>}
+            <span className="mono" style={{marginLeft:"auto",fontSize:11,opacity:.35}}>↵ to search • saved to DB deduplicated by phone</span>
+          </div>
+        </div>
+      </div>
+
+      {error && <div className="mono" style={{marginTop:12,background:"#FF3B30",color:"#fff",padding:"12px 14px",borderRadius:12,fontSize:13,fontWeight:600}}>{error}</div>}
+
+      {hasSearched && (
+        <div style={{marginTop:16}}>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:12,background:"rgba(255,255,255,.03)",border:"1px solid rgba(255,255,255,.06)",borderRadius:14,padding:10}}>
+            <input value={searchInResults} onChange={e=>setSearchInResults(e.target.value)} placeholder="filter in results…" style={{flex:"1 1 160px",padding:"8px 12px",borderRadius:99,background:"rgba(0,0,0,.3)",border:"1px solid rgba(255,255,255,.08)",color:"#fff",fontSize:12,outline:"none"}}/>
+            <select value={filterCategory} onChange={e=>setFilterCategory(e.target.value)} style={{padding:"8px 12px",borderRadius:99,background:"rgba(0,0,0,.3)",border:"1px solid rgba(255,255,255,.08)",color:"#fff",fontSize:12}}>
+              {categories.map(c=> <option key={c} value={c} style={{color:"#000"}}>{c==="all"?"ALL CATEGORIES":c.toUpperCase()}</option>)}
+            </select>
+            <select value={sortBy} onChange={e=>setSortBy(e.target.value)} style={{padding:"8px 12px",borderRadius:99,background:"rgba(0,0,0,.3)",border:"1px solid rgba(255,255,255,.08)",color:"#fff",fontSize:12}}>
+              <option value="default" style={{color:"#000"}}>SORT: DEFAULT</option>
+              <option value="rating" style={{color:"#000"}}>RATING ↓</option>
+              <option value="reviews" style={{color:"#000"}}>REVIEWS ↓</option>
+              <option value="name" style={{color:"#000"}}>NAME A-Z</option>
+            </select>
+            <select value={hasPhoneFilter} onChange={e=>setHasPhoneFilter(e.target.value)} style={{padding:"8px 12px",borderRadius:99,background:"rgba(0,0,0,.3)",border:"1px solid rgba(255,255,255,.08)",color:"#fff",fontSize:12}}>
+              <option value="all" style={{color:"#000"}}>ALL PHONES</option>
+              <option value="yes" style={{color:"#000"}}>WITH PHONE</option>
+              <option value="no" style={{color:"#000"}}>NO PHONE</option>
+            </select>
+            <div style={{display:"flex",alignItems:"center",gap:6,background:"rgba(0,0,0,.2)",border:"1px solid rgba(255,255,255,.08)",borderRadius:99,padding:"6px 10px"}}>
+              <span className="mono" style={{fontSize:11,opacity:.6}}>MIN ★</span>
+              <input type="range" min="0" max="4.5" step="0.5" value={filterRating} onChange={e=>setFilterRating(parseFloat(e.target.value))} style={{width:70,accentColor:"#7CFF67"}}/>
+              <span className="mono" style={{fontSize:11,minWidth:18}}>{filterRating||"—"}</span>
+            </div>
+            <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:700,cursor:"pointer",background:onlyNoWebsite?"#7CFF67":"rgba(255,255,255,.06)",color:onlyNoWebsite?"#000":"#fff",padding:"8px 12px",borderRadius:99,border:"1px solid rgba(255,255,255,.1)"}}>
+              <input type="checkbox" checked={onlyNoWebsite} onChange={e=>setOnlyNoWebsite(e.target.checked)} style={{accentColor:"#7CFF67"}}/> NO WEBSITE
+            </label>
+            <span className="mono" style={{marginLeft:"auto",fontSize:11,opacity:.4}}>{processedLeads.length}/{leads.length} shown</span>
+          </div>
+
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:10,flexWrap:"wrap"}}>
+            <div style={{display:"flex",alignItems:"baseline",gap:10}}><div style={{fontSize:26,fontWeight:800,letterSpacing:"-0.04em"}}>{processedLeads.length}</div><div className="mono" style={{fontSize:11,opacity:.5,letterSpacing:"0.14em"}}>LEADS {leads.length!==processedLeads.length&&`• ${dedupRemoved} dupes hidden`}</div></div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <button onClick={()=>handleExport("csv")} disabled={selectedCount===0} style={{padding:"8px 16px",borderRadius:99,fontSize:12,fontWeight:800,border:"none",background:selectedCount===0?"#1A1A1E":"#FF3B30",color:"#fff",cursor:selectedCount===0?"default":"pointer"}}>CSV {selectedCount?`(${selectedCount})`:""} ↘</button>
+              <button onClick={()=>handleExport("json")} disabled={selectedCount===0} style={{padding:"8px 14px",borderRadius:99,fontSize:12,fontWeight:700,border:"1px solid rgba(255,255,255,.14)",background:"transparent",color:"#fff",cursor:"pointer"}}>JSON</button>
+              <button onClick={()=>{const nums=processedLeads.filter(l=>selected[l.id]&&l.phone).map(l=>l.phone).join("\n");if(nums) copyToClipboard(nums,"bulk-phones")}} disabled={selectedCount===0} style={{padding:"8px 14px",borderRadius:99,fontSize:12,fontWeight:700,border:"1px solid rgba(255,255,255,.14)",background:copiedId==="bulk-phones"?"#fff":"transparent",color:copiedId==="bulk-phones"?"#000":"#fff",cursor:"pointer"}}>{copiedId==="bulk-phones"?"COPIED!":"COPY PHONES"}</button>
+            </div>
+          </div>
+
+          {processedLeads.length===0 ? (
+            <div style={{padding:40,textAlign:"center",border:"1px dashed rgba(255,255,255,.12)",borderRadius:16,opacity:.6}} className="mono">NO MATCHES — loosen filters</div>
+          ) : (
+            <div style={{borderRadius:16,overflow:"hidden",border:"1px solid rgba(255,255,255,.08)",background:"rgba(255,255,255,.03)",backdropFilter:"blur(10px)"}}>
+              <div className="mono" style={{display:"grid",gridTemplateColumns:"36px 2.2fr 1.2fr 90px 1.6fr 110px",gap:0,padding:"10px 14px",fontSize:10,letterSpacing:"0.12em",opacity:.5,borderBottom:"1px solid rgba(255,255,255,.08)",background:"rgba(255,255,255,.04)"}}>
+                <input type="checkbox" checked={allChecked} onChange={e=>toggleAll(e.target.checked)} style={{accentColor:"#FF3B30"}}/>
+                <span>BUSINESS</span><span>PHONE</span><span>SITE</span><span>HOURS</span><span>RATING</span>
+              </div>
+              {processedLeads.map((l,i)=>(
+                <div key={l.id} style={{display:"grid",gridTemplateColumns:"36px 2.2fr 1.2fr 90px 1.6fr 110px",gap:0,padding:"14px",fontSize:13,borderBottom:i===processedLeads.length-1?"none":"1px solid rgba(255,255,255,.06)",alignItems:"start",background:i%2===1?"rgba(255,255,255,.015)":"transparent"}}>
+                  <input type="checkbox" checked={!!selected[l.id]} onChange={()=>toggle(l.id)} style={{marginTop:4,accentColor:"#FF3B30"}}/>
+                  <div>
+                    <div style={{fontWeight:800,letterSpacing:"-0.02em",lineHeight:1.1}}>{l.name||"—"}</div>
+                    <div className="mono" style={{fontSize:11,opacity:.5,marginTop:4,lineHeight:1.3}}>{l.address||"—"}</div>
+                    <div className="mono" style={{fontSize:10,opacity:.35,marginTop:2}}>{l.category?`#${l.category}`:""}</div>
+                    {l.maps_url && <a href={l.maps_url} target="_blank" rel="noopener" className="mono" style={{fontSize:10,color:"#7CFF67",textDecoration:"none"}}>MAPS ↗</a>}
+                  </div>
+                  <div>{l.phone ? <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}><span className="mono" style={{fontSize:12,background:"rgba(255,255,255,.08)",padding:"4px 8px",borderRadius:8,border:"1px solid rgba(255,255,255,.08)"}}>{l.phone}</span><button onClick={()=>copyToClipboard(l.phone,l.id+"-phone")} className="mono" style={{border:"none",background:copiedId===l.id+"-phone"?"#7CFF67":"#fff",color:"#000",borderRadius:7,padding:"4px 8px",fontSize:10,fontWeight:800,cursor:"pointer"}}>{copiedId===l.id+"-phone"?"COPIED":"COPY"}</button></div> : <span className="mono" style={{opacity:.35}}>—</span>}</div>
+                  <div>{l.hasWebsite ? <a href={l.website} target="_blank" rel="noopener" style={{display:"inline-block",padding:"4px 10px",borderRadius:99,background:"#7CFF67",color:"#000",fontSize:11,fontWeight:800,textDecoration:"none"}}>YES ↗</a> : <span style={{display:"inline-block",padding:"4px 10px",borderRadius:99,background:"rgba(255,59,48,.15)",border:"1px solid rgba(255,59,48,.4)",color:"#FF8A80",fontSize:11,fontWeight:800}}>NO</span>}</div>
+                  <div className="mono" style={{fontSize:11,opacity:.75,lineHeight:1.4}}>{l.hours ? <><span onClick={()=>setExpandedHours(p=>({...p,[l.id]:!p[l.id]}))} style={{cursor:"pointer"}}>{expandedHours[l.id]? l.hours : (l.hours.length>52 ? l.hours.slice(0,52)+"…" : l.hours)}</span> <button onClick={()=>copyToClipboard(l.hours,l.id+"-hours")} style={{marginLeft:6,background:"transparent",border:"1px solid rgba(255,255,255,.14)",color:"#aaa",borderRadius:6,padding:"1px 5px",fontSize:10,cursor:"pointer"}}>{copiedId===l.id+"-hours"?"✓":"⎘"}</button></> : <span style={{opacity:.4}}>—</span>}</div>
+                  <div className="mono" style={{fontSize:12}}>{l.rating ? <><span style={{fontWeight:800}}>{l.rating} ★</span><span style={{opacity:.5}}> ({l.reviews||0})</span> <button onClick={()=>copyToClipboard(`${l.rating} (${l.reviews} reviews)`,l.id+"-rating")} style={{marginLeft:4,background:"transparent",border:"1px solid rgba(255,255,255,.14)",color:"#aaa",borderRadius:6,padding:"1px 5px",fontSize:10,cursor:"pointer"}}>{copiedId===l.id+"-rating"?"✓":"⎘"}</button></> : <span style={{opacity:.4}}>—</span>}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {!hasSearched && (
+        <div style={{marginTop:18,display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10}}>
+          {['dentists in Koramangala','cafes in Indiranagar','gyms in Austin TX','plumbers in Bandra'].map(q=>(
+            <button key={q} onClick={()=>runSearch(null,q)} style={{textAlign:"left",padding:"14px",borderRadius:14,background:"rgba(255,255,255,.04)",border:"1px solid rgba(255,255,255,.06)",color:"#fff",cursor:"pointer"}}>
+              <div className="mono" style={{fontSize:10,opacity:.4,letterSpacing:"0.12em"}}>TRY</div>
+              <div style={{fontWeight:700,marginTop:4}}>{q}</div>
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="mono" style={{marginTop:28,textAlign:"center",fontSize:10,opacity:.25,letterSpacing:"0.12em"}}>ATHENA © 2026 — HUNT. COPY. CLOSE.</div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
